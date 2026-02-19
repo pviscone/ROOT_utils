@@ -7,6 +7,7 @@
 #include <cstring>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <memory>
 #include <regex>
@@ -234,6 +235,8 @@ template <typename T> bool compareValues(T val1, T val2) {
   if constexpr (std::is_floating_point_v<T>) {
     if (std::isnan(val1) && std::isnan(val2))
       return true;
+    if (std::isinf(val1) && std::isinf(val2))
+      return std::signbit(val1) == std::signbit(val2);
     if (ABS_TOLERANCE >= 0)
       return std::abs(val1 - val2) <= ABS_TOLERANCE;
     if (REL_TOLERANCE >= 0)
@@ -249,6 +252,8 @@ template <typename T1, typename T2> bool compareMixedValues(T1 val1, T2 val2) {
     long double d2 = static_cast<long double>(val2);
     if (std::isnan(d1) && std::isnan(d2))
       return true;
+    if (std::isinf(d1) && std::isinf(d2))
+      return std::signbit(d1) == std::signbit(d2);
     if (ABS_TOLERANCE >= 0)
       return std::abs(d1 - d2) <= ABS_TOLERANCE;
     if (REL_TOLERANCE >= 0)
@@ -280,11 +285,9 @@ template <typename T> std::string formatValue(T val) {
 
 struct DiffEntry {
   int index;
-  std::string val1Str;
-  std::string val2Str;
+  std::vector<std::string> vals;
+  std::vector<bool> isFloats;
   bool isDifferent;
-  bool isFloat1;
-  bool isFloat2;
 };
 
 size_t getVisibleLength(const std::string &str) {
@@ -357,6 +360,8 @@ alignNumericStrings(const std::vector<std::string> &strings,
   for (const auto &s : strings) {
     if (s == "*")
       continue;
+    if (s == "True" || s == "False")
+      continue;
     size_t dotPos = s.find('.');
     if (dotPos != std::string::npos) {
       maxInt = std::max(maxInt, (int)dotPos);
@@ -368,8 +373,15 @@ alignNumericStrings(const std::vector<std::string> &strings,
 
   for (const auto &s : strings) {
     if (s == "*") {
-      int width = maxInt + (maxDec > 0 ? 1 + maxDec : 0);
-      result.push_back(std::string(std::max(0, width - 1), ' ') + "*");
+      int leftPad = std::max(0, maxInt - 1);
+      std::string tail = (maxDec > 0) ? std::string(1 + maxDec, ' ') : "";
+      result.push_back(std::string(leftPad, ' ') + "*" + tail);
+    } else if (s == "True" || s == "False") {
+      int leftPad = std::max(0, maxInt - 1);
+      int totalWidth = maxInt + (maxDec > 0 ? 1 + maxDec : 0);
+      int rightPad = std::max(0, totalWidth - leftPad - (int)s.length());
+      result.push_back(std::string(leftPad, ' ') + s +
+                       std::string(rightPad, ' '));
     } else if (s.find('e') != std::string::npos) {
       int width = maxInt + (maxDec > 0 ? 1 + maxDec : 0);
       result.push_back(std::string(std::max(0, width - (int)s.length()), ' ') +
@@ -389,130 +401,6 @@ alignNumericStrings(const std::vector<std::string> &strings,
     }
   }
   return result;
-}
-
-std::string createBranchPanel(const std::string &branchName,
-                              const std::vector<DiffEntry> &entries,
-                              bool compact) {
-  std::vector<DiffEntry> filteredEntries;
-  if (compact) {
-    for (const auto &e : entries)
-      if (e.isDifferent)
-        filteredEntries.push_back(e);
-  } else {
-    filteredEntries = entries;
-  }
-  if (filteredEntries.empty())
-    return "";
-
-  std::vector<std::string> val1Strs, val2Strs;
-  std::vector<bool> val1IsFloats, val2IsFloats;
-  for (const auto &e : filteredEntries) {
-    val1Strs.push_back(e.val1Str);
-    val2Strs.push_back(e.val2Str);
-    val1IsFloats.push_back(e.isFloat1);
-    val2IsFloats.push_back(e.isFloat2);
-  }
-
-  auto alignedVal1 = alignNumericStrings(val1Strs, val1IsFloats);
-  auto alignedVal2 = alignNumericStrings(val2Strs, val2IsFloats);
-
-  int maxIdxWidth = compact && !filteredEntries.empty()
-                        ? std::to_string(filteredEntries.back().index).length()
-                        : 1;
-
-  // Calculate the EXACT width each line will have
-  size_t idxWidth = 0;
-  if (compact) {
-    idxWidth = maxIdxWidth + 3; // [idx] + space
-  }
-
-  // Arrow width is always the same
-  size_t arrowWidth = 6; // "  ->  "
-
-  // Value widths - these are already aligned, so all val1 have same length, all
-  // val2 have same length
-  size_t val1Width = alignedVal1.empty() ? 0 : alignedVal1[0].length();
-  size_t val2Width = alignedVal2.empty() ? 0 : alignedVal2[0].length();
-
-  // Total content width is fixed for all lines
-  size_t contentWidth = idxWidth + val1Width + arrowWidth + val2Width;
-
-  // Panel width must fit both title and content
-  size_t titleWidth = branchName.length();
-  size_t panelContentWidth = std::max(contentWidth, titleWidth);
-
-  // Build colored lines - all will be exactly panelContentWidth
-  std::vector<std::string> coloredLines;
-  for (size_t i = 0; i < filteredEntries.size(); i++) {
-    const auto &e = filteredEntries[i];
-    std::ostringstream ls;
-    size_t lineLen = 0;
-
-    if (compact) {
-      std::string idx =
-          "[" +
-          std::string(maxIdxWidth - std::to_string(e.index).length(), ' ') +
-          std::to_string(e.index) + "]";
-      ls << Color::DIM << Color::CYAN << idx << Color::RESET << " ";
-      lineLen += idx.length() + 1;
-    }
-
-    if (alignedVal1[i].find('*') != std::string::npos)
-      ls << Color::RED << alignedVal1[i] << Color::RESET;
-    else if (e.isDifferent)
-      ls << Color::YELLOW << alignedVal1[i] << Color::RESET;
-    else
-      ls << Color::DIM << alignedVal1[i] << Color::RESET;
-    lineLen += alignedVal1[i].length();
-
-    if (e.isDifferent) {
-      ls << "  " << Color::DIM << Color::CYAN << "->" << Color::RESET << "  ";
-    } else {
-      ls << std::string(arrowWidth, ' ');
-    }
-    lineLen += arrowWidth;
-
-    if (alignedVal2[i].find('*') != std::string::npos)
-      ls << Color::RED << alignedVal2[i] << Color::RESET;
-    else if (e.isDifferent)
-      ls << Color::GREEN << alignedVal2[i] << Color::RESET;
-    else
-      ls << Color::DIM << alignedVal2[i] << Color::RESET;
-    lineLen += alignedVal2[i].length();
-
-    // Pad to panelContentWidth
-    if (lineLen < panelContentWidth) {
-      ls << std::string(panelContentWidth - lineLen, ' ');
-    }
-
-    coloredLines.push_back(ls.str());
-  }
-
-  std::ostringstream panel;
-
-  // Top border with title centered
-  size_t totalBorderWidth =
-      panelContentWidth + 2; // +2 for spaces around content
-  size_t leftPad = (totalBorderWidth - titleWidth) / 2;
-  size_t rightPad = totalBorderWidth - titleWidth - leftPad;
-
-  panel << Color::BLUE << "╭" << horizontalLine(leftPad) << Color::RESET
-        << Color::BOLD << Color::BLUE << branchName << Color::RESET
-        << Color::BLUE << horizontalLine(rightPad) << "╮" << Color::RESET
-        << "\n";
-
-  // Content lines with borders
-  for (const auto &line : coloredLines) {
-    panel << Color::BLUE << "│ " << Color::RESET << line << Color::BLUE << " │"
-          << Color::RESET << "\n";
-  }
-
-  // Bottom border
-  panel << Color::BLUE << "╰" << horizontalLine(totalBorderWidth) << "╯"
-        << Color::RESET;
-
-  return panel.str();
 }
 
 std::vector<std::string> splitPanelLines(const std::string &panel) {
@@ -758,142 +646,117 @@ public:
   virtual ~BranchDiffHandler() = default;
   virtual bool processEvent(std::vector<DiffEntry> &entries) = 0;
   virtual std::string getBranchName() const = 0;
+  virtual size_t fileCount() const = 0;
 };
 
-template <typename T> class ReaderScalarHandler : public BranchDiffHandler {
+template <typename T>
+class ReaderScalarHandlerMulti : public BranchDiffHandler {
   std::string branchName;
-  TTreeReaderValue<T> reader1, reader2;
+  std::vector<std::unique_ptr<TTreeReaderValue<T>>> readers;
 
 public:
-  ReaderScalarHandler(const std::string &name, TTreeReader &r1, TTreeReader &r2)
-      : branchName(name), reader1(r1, name.c_str()), reader2(r2, name.c_str()) {
-  }
-
-  bool processEvent(std::vector<DiffEntry> &entries) override {
-    T val1 = *reader1, val2 = *reader2;
-    bool isDiff = !compareValues(val1, val2);
-    DiffEntry e{
-        0,      formatValue(val1),           formatValue(val2),
-        isDiff, std::is_floating_point_v<T>, std::is_floating_point_v<T>};
-    entries.push_back(e);
-    return isDiff;
-  }
-  std::string getBranchName() const override { return branchName; }
-};
-
-template <typename T> class ReaderArrayHandler : public BranchDiffHandler {
-  std::string branchName;
-  TTreeReaderArray<T> reader1, reader2;
-
-public:
-  ReaderArrayHandler(const std::string &name, TTreeReader &r1, TTreeReader &r2)
-      : branchName(name), reader1(r1, name.c_str()), reader2(r2, name.c_str()) {
-  }
-
-  bool processEvent(std::vector<DiffEntry> &entries) override {
-    bool hasDiff = false;
-    size_t size1 = reader1.GetSize(), size2 = reader2.GetSize();
-    size_t maxSize = std::max(size1, size2);
-
-    for (size_t i = 0; i < maxSize; i++) {
-      DiffEntry e;
-      e.index = i;
-      e.isFloat1 = e.isFloat2 = std::is_floating_point_v<T>;
-
-      if (i < size1 && i < size2) {
-        T v1 = reader1[i], v2 = reader2[i];
-        e.val1Str = formatValue(v1);
-        e.val2Str = formatValue(v2);
-        e.isDifferent = !compareValues(v1, v2);
-      } else if (i < size1) {
-        e.val1Str = formatValue(reader1[i]);
-        e.val2Str = "*";
-        e.isDifferent = true;
-      } else {
-        e.val1Str = "*";
-        e.val2Str = formatValue(reader2[i]);
-        e.isDifferent = true;
-      }
-      entries.push_back(e);
-      if (e.isDifferent)
-        hasDiff = true;
+  ReaderScalarHandlerMulti(const std::string &name,
+                           const std::vector<TTreeReader *> &rs)
+      : branchName(name) {
+    readers.reserve(rs.size());
+    for (auto *r : rs) {
+      readers.push_back(
+          std::make_unique<TTreeReaderValue<T>>(*r, name.c_str()));
     }
+  }
+
+  bool processEvent(std::vector<DiffEntry> &entries) override {
+    std::vector<std::string> vals;
+    std::vector<bool> isFloats;
+    vals.reserve(readers.size());
+    isFloats.reserve(readers.size());
+
+    bool hasDiff = false;
+    bool hasPrev = false;
+    T prevVal{};
+
+    for (const auto &reader : readers) {
+      T v = *(*reader);
+      vals.push_back(formatValue(v));
+      isFloats.push_back(std::is_floating_point_v<T>);
+      if (hasPrev && !compareValues(prevVal, v)) {
+        hasDiff = true;
+      }
+      hasPrev = true;
+      prevVal = v;
+    }
+
+    DiffEntry e{0, vals, isFloats, hasDiff};
+    entries.push_back(e);
     return hasDiff;
   }
-  std::string getBranchName() const override { return branchName; }
-};
-
-template <typename T1, typename T2>
-class ReaderScalarHandlerMixed : public BranchDiffHandler {
-  std::string branchName;
-  TTreeReaderValue<T1> reader1;
-  TTreeReaderValue<T2> reader2;
-
-public:
-  ReaderScalarHandlerMixed(const std::string &name, TTreeReader &r1,
-                           TTreeReader &r2)
-      : branchName(name), reader1(r1, name.c_str()), reader2(r2, name.c_str()) {
-  }
-
-  bool processEvent(std::vector<DiffEntry> &entries) override {
-    T1 val1 = *reader1;
-    T2 val2 = *reader2;
-    bool isDiff = !compareMixedValues(val1, val2);
-    DiffEntry e{0,
-                formatValue(val1),
-                formatValue(val2),
-                isDiff,
-                std::is_floating_point_v<T1>,
-                std::is_floating_point_v<T2>};
-    entries.push_back(e);
-    return isDiff;
-  }
 
   std::string getBranchName() const override { return branchName; }
+  size_t fileCount() const override { return readers.size(); }
 };
 
-template <typename T1, typename T2>
-class ReaderArrayHandlerMixed : public BranchDiffHandler {
+template <typename T> class ReaderArrayHandlerMulti : public BranchDiffHandler {
   std::string branchName;
-  TTreeReaderArray<T1> reader1;
-  TTreeReaderArray<T2> reader2;
+  std::vector<std::unique_ptr<TTreeReaderArray<T>>> readers;
 
 public:
-  ReaderArrayHandlerMixed(const std::string &name, TTreeReader &r1,
-                          TTreeReader &r2)
-      : branchName(name), reader1(r1, name.c_str()), reader2(r2, name.c_str()) {
+  ReaderArrayHandlerMulti(const std::string &name,
+                          const std::vector<TTreeReader *> &rs)
+      : branchName(name) {
+    readers.reserve(rs.size());
+    for (auto *r : rs) {
+      readers.push_back(
+          std::make_unique<TTreeReaderArray<T>>(*r, name.c_str()));
+    }
   }
 
   bool processEvent(std::vector<DiffEntry> &entries) override {
     bool hasDiff = false;
-    size_t size1 = reader1.GetSize();
-    size_t size2 = reader2.GetSize();
-    size_t maxSize = std::max(size1, size2);
+    std::vector<size_t> sizes;
+    sizes.reserve(readers.size());
+
+    size_t maxSize = 0;
+    for (const auto &reader : readers) {
+      size_t sz = reader->GetSize();
+      sizes.push_back(sz);
+      maxSize = std::max(maxSize, sz);
+    }
 
     for (size_t i = 0; i < maxSize; i++) {
       DiffEntry e;
-      e.index = i;
-      e.isFloat1 = std::is_floating_point_v<T1>;
-      e.isFloat2 = std::is_floating_point_v<T2>;
+      e.index = static_cast<int>(i);
+      e.vals.resize(readers.size());
+      e.isFloats.resize(readers.size(), std::is_floating_point_v<T>);
 
-      if (i < size1 && i < size2) {
-        T1 v1 = reader1[i];
-        T2 v2 = reader2[i];
-        e.val1Str = formatValue(v1);
-        e.val2Str = formatValue(v2);
-        e.isDifferent = !compareMixedValues(v1, v2);
-      } else if (i < size1) {
-        e.val1Str = formatValue(reader1[i]);
-        e.val2Str = "*";
-        e.isDifferent = true;
-      } else {
-        e.val1Str = "*";
-        e.val2Str = formatValue(reader2[i]);
-        e.isDifferent = true;
+      bool rowDiff = false;
+      bool hasPrev = false;
+      bool prevMissing = false;
+      T prevVal{};
+
+      for (size_t r = 0; r < readers.size(); r++) {
+        bool missing = i >= sizes[r];
+        if (missing) {
+          e.vals[r] = "*";
+        } else {
+          T v = (*readers[r])[i];
+          e.vals[r] = formatValue(v);
+          if (hasPrev && !prevMissing && !compareValues(prevVal, v)) {
+            rowDiff = true;
+          }
+          prevVal = v;
+        }
+
+        if (hasPrev && prevMissing != missing) {
+          rowDiff = true;
+        }
+
+        hasPrev = true;
+        prevMissing = missing;
       }
 
+      e.isDifferent = rowDiff;
       entries.push_back(e);
-      if (e.isDifferent)
+      if (rowDiff)
         hasDiff = true;
     }
 
@@ -901,173 +764,109 @@ public:
   }
 
   std::string getBranchName() const override { return branchName; }
+  size_t fileCount() const override { return readers.size(); }
 };
 
-template <typename T1>
+template <typename T>
 std::unique_ptr<BranchDiffHandler>
-makeArrayHandlerForType2(ElemTypeId type2, const std::string &branchName,
-                         TTreeReader &r1, TTreeReader &r2) {
-  switch (type2) {
-  case ElemTypeId::Float:
-    return std::make_unique<ReaderArrayHandlerMixed<T1, float>>(branchName, r1,
-                                                                r2);
-  case ElemTypeId::Double:
-    return std::make_unique<ReaderArrayHandlerMixed<T1, double>>(branchName, r1,
-                                                                 r2);
-  case ElemTypeId::Int:
-    return std::make_unique<ReaderArrayHandlerMixed<T1, int>>(branchName, r1,
-                                                              r2);
-  case ElemTypeId::Bool:
-    return std::make_unique<ReaderArrayHandlerMixed<T1, bool>>(branchName, r1,
-                                                               r2);
-  case ElemTypeId::Long:
-    return std::make_unique<ReaderArrayHandlerMixed<T1, Long64_t>>(branchName,
-                                                                   r1, r2);
-  case ElemTypeId::Short:
-    return std::make_unique<ReaderArrayHandlerMixed<T1, Short_t>>(branchName,
-                                                                  r1, r2);
-  case ElemTypeId::Char:
-    return std::make_unique<ReaderArrayHandlerMixed<T1, Char_t>>(branchName, r1,
-                                                                 r2);
-  case ElemTypeId::UChar:
-    return std::make_unique<ReaderArrayHandlerMixed<T1, UChar_t>>(branchName,
-                                                                  r1, r2);
-  case ElemTypeId::UInt:
-    return std::make_unique<ReaderArrayHandlerMixed<T1, UInt_t>>(branchName, r1,
-                                                                 r2);
-  case ElemTypeId::UShort:
-    return std::make_unique<ReaderArrayHandlerMixed<T1, UShort_t>>(branchName,
-                                                                   r1, r2);
-  default:
-    return nullptr;
-  }
+makeArrayHandlerForTypeMulti(const std::string &branchName,
+                             const std::vector<TTreeReader *> &readers) {
+  return std::make_unique<ReaderArrayHandlerMulti<T>>(branchName, readers);
 }
 
-template <typename T1>
+template <typename T>
 std::unique_ptr<BranchDiffHandler>
-makeScalarHandlerForType2(ElemTypeId type2, const std::string &branchName,
-                          TTreeReader &r1, TTreeReader &r2) {
-  switch (type2) {
-  case ElemTypeId::Float:
-    return std::make_unique<ReaderScalarHandlerMixed<T1, float>>(branchName, r1,
-                                                                 r2);
-  case ElemTypeId::Double:
-    return std::make_unique<ReaderScalarHandlerMixed<T1, double>>(branchName,
-                                                                  r1, r2);
-  case ElemTypeId::Int:
-    return std::make_unique<ReaderScalarHandlerMixed<T1, int>>(branchName, r1,
-                                                               r2);
-  case ElemTypeId::Bool:
-    return std::make_unique<ReaderScalarHandlerMixed<T1, bool>>(branchName, r1,
-                                                                r2);
-  case ElemTypeId::Long:
-    return std::make_unique<ReaderScalarHandlerMixed<T1, Long64_t>>(branchName,
-                                                                    r1, r2);
-  case ElemTypeId::Short:
-    return std::make_unique<ReaderScalarHandlerMixed<T1, Short_t>>(branchName,
-                                                                   r1, r2);
-  case ElemTypeId::Char:
-    return std::make_unique<ReaderScalarHandlerMixed<T1, Char_t>>(branchName,
-                                                                  r1, r2);
-  case ElemTypeId::UChar:
-    return std::make_unique<ReaderScalarHandlerMixed<T1, UChar_t>>(branchName,
-                                                                   r1, r2);
-  case ElemTypeId::UInt:
-    return std::make_unique<ReaderScalarHandlerMixed<T1, UInt_t>>(branchName,
-                                                                  r1, r2);
-  case ElemTypeId::UShort:
-    return std::make_unique<ReaderScalarHandlerMixed<T1, UShort_t>>(branchName,
-                                                                    r1, r2);
-  default:
-    return nullptr;
-  }
+makeScalarHandlerForTypeMulti(const std::string &branchName,
+                              const std::vector<TTreeReader *> &readers) {
+  return std::make_unique<ReaderScalarHandlerMulti<T>>(branchName, readers);
 }
 
 std::unique_ptr<BranchDiffHandler>
-createReaderHandler(const std::string &branchName, TTreeReader &r1,
-                    TTreeReader &r2, TTree *tree1, TTree *tree2) {
-  TBranch *branch1 = tree1->GetBranch(branchName.c_str());
-  TBranch *branch2 = tree2->GetBranch(branchName.c_str());
-  if (!branch1 || !branch2)
+createReaderHandler(const std::string &branchName,
+                    const std::vector<TTree *> &trees,
+                    const std::vector<TTreeReader *> &readers) {
+  if (trees.empty() || readers.size() != trees.size())
     return nullptr;
 
-  std::string elemType1 = getElementType(tree1, branchName);
-  std::string elemType2 = getElementType(tree2, branchName);
-  ElemTypeId typeId1 = parseElemTypeId(elemType1);
-  ElemTypeId typeId2 = parseElemTypeId(elemType2);
-
-  bool isColl1 = isCollection(tree1, branchName);
-  bool isColl2 = isCollection(tree2, branchName);
-
-  debugPrint("Handler: " + branchName + ", Type1: " + elemType1 + ", Type2: " +
-             elemType2 + ", IsCollection1: " + std::to_string(isColl1) +
-             ", IsCollection2: " + std::to_string(isColl2));
-
-  if (typeId1 == ElemTypeId::Unknown || typeId2 == ElemTypeId::Unknown) {
-    debugPrint("Warning: Unknown element type for " + branchName);
-    return nullptr;
+  for (auto *tree : trees) {
+    if (!tree || !tree->GetBranch(branchName.c_str()))
+      return nullptr;
   }
 
-  if (isColl1 != isColl2) {
-    debugPrint("Warning: Collection mismatch for " + branchName);
+  std::string elemType0 = getElementType(trees[0], branchName);
+  ElemTypeId typeId0 = parseElemTypeId(elemType0);
+  bool isColl0 = isCollection(trees[0], branchName);
+
+  if (typeId0 == ElemTypeId::Unknown)
     return nullptr;
+
+  for (size_t i = 1; i < trees.size(); i++) {
+    std::string elemType = getElementType(trees[i], branchName);
+    ElemTypeId typeId = parseElemTypeId(elemType);
+    bool isColl = isCollection(trees[i], branchName);
+
+    if (typeId != typeId0 || isColl != isColl0) {
+      debugPrint("Warning: Type or collection mismatch for " + branchName);
+      return nullptr;
+    }
   }
 
-  if (isColl1) {
-    switch (typeId1) {
+  if (isColl0) {
+    switch (typeId0) {
     case ElemTypeId::Float:
-      return makeArrayHandlerForType2<float>(typeId2, branchName, r1, r2);
+      return makeArrayHandlerForTypeMulti<float>(branchName, readers);
     case ElemTypeId::Double:
-      return makeArrayHandlerForType2<double>(typeId2, branchName, r1, r2);
+      return makeArrayHandlerForTypeMulti<double>(branchName, readers);
     case ElemTypeId::Int:
-      return makeArrayHandlerForType2<int>(typeId2, branchName, r1, r2);
+      return makeArrayHandlerForTypeMulti<int>(branchName, readers);
     case ElemTypeId::Bool:
-      return makeArrayHandlerForType2<bool>(typeId2, branchName, r1, r2);
+      return makeArrayHandlerForTypeMulti<bool>(branchName, readers);
     case ElemTypeId::Long:
-      return makeArrayHandlerForType2<Long64_t>(typeId2, branchName, r1, r2);
+      return makeArrayHandlerForTypeMulti<Long64_t>(branchName, readers);
     case ElemTypeId::Short:
-      return makeArrayHandlerForType2<Short_t>(typeId2, branchName, r1, r2);
+      return makeArrayHandlerForTypeMulti<Short_t>(branchName, readers);
     case ElemTypeId::Char:
-      return makeArrayHandlerForType2<Char_t>(typeId2, branchName, r1, r2);
+      return makeArrayHandlerForTypeMulti<Char_t>(branchName, readers);
     case ElemTypeId::UChar:
-      return makeArrayHandlerForType2<UChar_t>(typeId2, branchName, r1, r2);
+      return makeArrayHandlerForTypeMulti<UChar_t>(branchName, readers);
     case ElemTypeId::UInt:
-      return makeArrayHandlerForType2<UInt_t>(typeId2, branchName, r1, r2);
+      return makeArrayHandlerForTypeMulti<UInt_t>(branchName, readers);
     case ElemTypeId::UShort:
-      return makeArrayHandlerForType2<UShort_t>(typeId2, branchName, r1, r2);
+      return makeArrayHandlerForTypeMulti<UShort_t>(branchName, readers);
     default:
       return nullptr;
     }
   }
 
-  switch (typeId1) {
+  switch (typeId0) {
   case ElemTypeId::Float:
-    return makeScalarHandlerForType2<float>(typeId2, branchName, r1, r2);
+    return makeScalarHandlerForTypeMulti<float>(branchName, readers);
   case ElemTypeId::Double:
-    return makeScalarHandlerForType2<double>(typeId2, branchName, r1, r2);
+    return makeScalarHandlerForTypeMulti<double>(branchName, readers);
   case ElemTypeId::Int:
-    return makeScalarHandlerForType2<int>(typeId2, branchName, r1, r2);
+    return makeScalarHandlerForTypeMulti<int>(branchName, readers);
   case ElemTypeId::Bool:
-    return makeScalarHandlerForType2<bool>(typeId2, branchName, r1, r2);
+    return makeScalarHandlerForTypeMulti<bool>(branchName, readers);
   case ElemTypeId::Long:
-    return makeScalarHandlerForType2<Long64_t>(typeId2, branchName, r1, r2);
+    return makeScalarHandlerForTypeMulti<Long64_t>(branchName, readers);
   case ElemTypeId::Short:
-    return makeScalarHandlerForType2<Short_t>(typeId2, branchName, r1, r2);
+    return makeScalarHandlerForTypeMulti<Short_t>(branchName, readers);
   case ElemTypeId::Char:
-    return makeScalarHandlerForType2<Char_t>(typeId2, branchName, r1, r2);
+    return makeScalarHandlerForTypeMulti<Char_t>(branchName, readers);
   case ElemTypeId::UChar:
-    return makeScalarHandlerForType2<UChar_t>(typeId2, branchName, r1, r2);
+    return makeScalarHandlerForTypeMulti<UChar_t>(branchName, readers);
   case ElemTypeId::UInt:
-    return makeScalarHandlerForType2<UInt_t>(typeId2, branchName, r1, r2);
+    return makeScalarHandlerForTypeMulti<UInt_t>(branchName, readers);
   case ElemTypeId::UShort:
-    return makeScalarHandlerForType2<UShort_t>(typeId2, branchName, r1, r2);
+    return makeScalarHandlerForTypeMulti<UShort_t>(branchName, readers);
   default:
     return nullptr;
   }
 }
 
 void printUsage(const char *progName) {
-  std::cout << "Usage: " << progName << " FILE1 FILE2 [OPTIONS]\n\n";
+  std::cout << "Usage: " << progName
+            << " FILE1 FILE2 [FILE3 ...] [OPTIONS]\n\n";
   std::cout << "Options:\n";
   std::cout << "  -t, --tree NAME            Tree name (default: Events)\n";
   std::cout << "  -b, --branches PATTERN     Comma-separated regex patterns "
@@ -1087,13 +886,16 @@ void printUsage(const char *progName) {
 std::vector<std::string> createAlignedPanels(
     const std::vector<std::pair<std::string, std::vector<DiffEntry>>>
         &branchData,
-    bool compact) {
+    bool compact, size_t fileCount) {
   if (branchData.empty())
     return {};
 
+  if (fileCount == 0)
+    return {};
+
   // First pass: collect all values for alignment
-  std::vector<std::string> allVal1Strs, allVal2Strs;
-  std::vector<bool> allVal1IsFloats, allVal2IsFloats;
+  std::vector<std::vector<std::string>> allVals(fileCount);
+  std::vector<std::vector<bool>> allIsFloats(fileCount);
   size_t maxIdxWidth = 0;
 
   for (const auto &[branchName, entries] : branchData) {
@@ -1107,10 +909,10 @@ std::vector<std::string> createAlignedPanels(
     }
 
     for (const auto &e : filtered) {
-      allVal1Strs.push_back(e.val1Str);
-      allVal2Strs.push_back(e.val2Str);
-      allVal1IsFloats.push_back(e.isFloat1);
-      allVal2IsFloats.push_back(e.isFloat2);
+      for (size_t i = 0; i < fileCount && i < e.vals.size(); i++) {
+        allVals[i].push_back(e.vals[i]);
+        allIsFloats[i].push_back(e.isFloats[i]);
+      }
       if (compact) {
         maxIdxWidth =
             std::max(maxIdxWidth, (size_t)std::to_string(e.index).length());
@@ -1118,17 +920,18 @@ std::vector<std::string> createAlignedPanels(
     }
   }
 
-  // Align all values at once
-  auto alignedAllVal1 = alignNumericStrings(allVal1Strs, allVal1IsFloats);
-  auto alignedAllVal2 = alignNumericStrings(allVal2Strs, allVal2IsFloats);
-
-  // Get the width after alignment
-  size_t maxVal1Width = alignedAllVal1.empty() ? 0 : alignedAllVal1[0].length();
-  size_t maxVal2Width = alignedAllVal2.empty() ? 0 : alignedAllVal2[0].length();
+  // Align all values per column
+  std::vector<std::vector<std::string>> alignedAllVals(fileCount);
+  std::vector<size_t> maxValWidths(fileCount, 0);
+  for (size_t i = 0; i < fileCount; i++) {
+    alignedAllVals[i] = alignNumericStrings(allVals[i], allIsFloats[i]);
+    if (!alignedAllVals[i].empty())
+      maxValWidths[i] = alignedAllVals[i][0].length();
+  }
 
   // Second pass: create panels with aligned values
   std::vector<std::string> panels;
-  size_t valueIndex = 0; // Track position in aligned arrays
+  std::vector<size_t> valueIndex(fileCount, 0);
 
   for (const auto &[branchName, entries] : branchData) {
     std::vector<DiffEntry> filtered;
@@ -1151,9 +954,26 @@ std::vector<std::string> createAlignedPanels(
       idxWidth = maxIdxWidth + 3; // [idx] + space
     }
 
-    size_t arrowWidth = 6; // "  ->  "
-    size_t contentWidth = idxWidth + maxVal1Width + arrowWidth + maxVal2Width;
     size_t titleWidth = branchName.length();
+    std::string coloredTitle;
+    {
+      size_t pos = branchName.find('_');
+      if (pos == std::string::npos) {
+        coloredTitle = Color::BOLD_BLUE + branchName + Color::RESET;
+      } else {
+        std::string prefix = branchName.substr(0, pos + 1);
+        std::string suffix = branchName.substr(pos + 1);
+        coloredTitle = Color::CYAN + prefix + Color::RESET + Color::BOLD_BLUE +
+                       suffix + Color::RESET;
+      }
+    }
+
+    size_t arrowWidth = 6; // "  ->  "
+    size_t valuesWidth = 0;
+    for (size_t i = 0; i < fileCount; i++)
+      valuesWidth += maxValWidths[i];
+    size_t contentWidth = idxWidth + valuesWidth +
+                          arrowWidth * (fileCount > 0 ? fileCount - 1 : 0);
     size_t panelContentWidth = std::max(contentWidth, titleWidth);
 
     for (const auto &e : filtered) {
@@ -1169,34 +989,33 @@ std::vector<std::string> createAlignedPanels(
         lineLen += idx.length() + 1;
       }
 
-      // Use the pre-aligned value
-      std::string val1Aligned = alignedAllVal1[valueIndex];
-      if (val1Aligned.find('*') != std::string::npos)
-        ls << Color::RED << val1Aligned << Color::RESET;
-      else if (e.isDifferent)
-        ls << Color::YELLOW << val1Aligned << Color::RESET;
-      else
-        ls << Color::DIM << val1Aligned << Color::RESET;
-      lineLen += maxVal1Width;
+      for (size_t i = 0; i < fileCount; i++) {
+        std::string valAligned = alignedAllVals[i][valueIndex[i]];
+        bool isMissing = valAligned.find('*') != std::string::npos;
+        if (isMissing) {
+          ls << Color::RED << valAligned << Color::RESET;
+        } else if (e.isDifferent) {
+          if (i == fileCount - 1) {
+            ls << Color::GREEN << valAligned << Color::RESET;
+          } else {
+            ls << Color::YELLOW << valAligned << Color::RESET;
+          }
+        } else {
+          ls << Color::DIM << valAligned << Color::RESET;
+        }
+        lineLen += maxValWidths[i];
+        valueIndex[i]++;
 
-      if (e.isDifferent) {
-        ls << "  " << Color::DIM << Color::CYAN << "->" << Color::RESET << "  ";
-      } else {
-        ls << std::string(arrowWidth, ' ');
+        if (i + 1 < fileCount) {
+          if (e.isDifferent) {
+            ls << "  " << Color::DIM << Color::CYAN << "->" << Color::RESET
+               << "  ";
+          } else {
+            ls << std::string(arrowWidth, ' ');
+          }
+          lineLen += arrowWidth;
+        }
       }
-      lineLen += arrowWidth;
-
-      // Use the pre-aligned value
-      std::string val2Aligned = alignedAllVal2[valueIndex];
-      if (val2Aligned.find('*') != std::string::npos)
-        ls << Color::RED << val2Aligned << Color::RESET;
-      else if (e.isDifferent)
-        ls << Color::GREEN << val2Aligned << Color::RESET;
-      else
-        ls << Color::DIM << val2Aligned << Color::RESET;
-      lineLen += maxVal2Width;
-
-      valueIndex++; // Move to next value
 
       // Pad to panelContentWidth
       if (lineLen < panelContentWidth) {
@@ -1214,9 +1033,8 @@ std::vector<std::string> createAlignedPanels(
     size_t rightPad = totalBorderWidth - titleWidth - leftPad;
 
     panel << Color::BLUE << "╭" << horizontalLine(leftPad) << Color::RESET
-          << Color::BOLD << Color::BLUE << branchName << Color::RESET
-          << Color::BLUE << horizontalLine(rightPad) << "╮" << Color::RESET
-          << "\n";
+          << Color::BOLD << coloredTitle << Color::RESET << Color::BLUE
+          << horizontalLine(rightPad) << "╮" << Color::RESET << "\n";
 
     for (const auto &line : coloredLines) {
       panel << Color::BLUE << "│ " << Color::RESET << line << Color::BLUE
@@ -1238,11 +1056,11 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  std::string file1Path = argv[1], file2Path = argv[2];
+  std::vector<std::string> filePaths;
   std::string treeName = "Events", branchPattern = ".*";
   Long64_t numEvents = -1, startEvent = 0;
 
-  for (int i = 3; i < argc; i++) {
+  for (int i = 1; i < argc; i++) {
     std::string arg = argv[i];
     if (arg == "-t" && i + 1 < argc)
       treeName = argv[++i];
@@ -1263,6 +1081,13 @@ int main(int argc, char **argv) {
     else if (arg == "-h" || arg == "--help") {
       printUsage(argv[0]);
       return 0;
+    } else if (arg.rfind("-", 0) == 0) {
+      std::cerr << Color::BOLD_RED << "Error: " << Color::RESET
+                << "Unknown option: " << arg << "\n";
+      printUsage(argv[0]);
+      return 1;
+    } else {
+      filePaths.push_back(arg);
     }
   }
 
@@ -1272,49 +1097,87 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  TFile *f1 = TFile::Open(file1Path.c_str());
-  TFile *f2 = TFile::Open(file2Path.c_str());
-  if (!f1 || !f2 || f1->IsZombie() || f2->IsZombie()) {
-    std::cerr << Color::BOLD_RED << "Error opening files\n" << Color::RESET;
+  if (filePaths.size() < 2) {
+    std::cerr << Color::BOLD_RED << "Error: " << Color::RESET
+              << "At least two files are required.\n";
+    printUsage(argv[0]);
     return 1;
   }
 
-  TTree *t1 = dynamic_cast<TTree *>(f1->Get(treeName.c_str()));
-  TTree *t2 = dynamic_cast<TTree *>(f2->Get(treeName.c_str()));
-  if (!t1 || !t2) {
-    std::cerr << Color::BOLD_RED << "Error: tree not found\n" << Color::RESET;
-    return 1;
+  std::vector<TFile *> files;
+  std::vector<TTree *> trees;
+  files.reserve(filePaths.size());
+  trees.reserve(filePaths.size());
+
+  for (const auto &path : filePaths) {
+    TFile *file = TFile::Open(path.c_str());
+    if (!file || file->IsZombie()) {
+      std::cerr << Color::BOLD_RED << "Error opening file: " << Color::RESET
+                << path << "\n";
+      if (file)
+        file->Close();
+      delete file;
+      for (auto *f : files) {
+        f->Close();
+        delete f;
+      }
+      return 1;
+    }
+    TTree *tree = dynamic_cast<TTree *>(file->Get(treeName.c_str()));
+    if (!tree) {
+      std::cerr << Color::BOLD_RED << "Error: tree not found in "
+                << Color::RESET << path << "\n";
+      file->Close();
+      delete file;
+      for (auto *f : files) {
+        f->Close();
+        delete f;
+      }
+      return 1;
+    }
+    files.push_back(file);
+    trees.push_back(tree);
   }
 
   auto patterns = compileBranchPatterns(branchPattern);
-  std::set<std::string> branches1, branches2, common;
+  std::vector<std::set<std::string>> branchesPerFile;
+  branchesPerFile.resize(trees.size());
 
-  for (int i = 0; i < t1->GetListOfBranches()->GetEntries(); i++) {
-    std::string n = t1->GetListOfBranches()->At(i)->GetName();
-    if (matchesPatterns(n, patterns))
-      branches1.insert(n);
+  std::set<std::string> allBranches;
+  for (size_t i = 0; i < trees.size(); i++) {
+    auto *list = trees[i]->GetListOfBranches();
+    for (int j = 0; j < list->GetEntries(); j++) {
+      std::string n = list->At(j)->GetName();
+      if (matchesPatterns(n, patterns)) {
+        branchesPerFile[i].insert(n);
+        allBranches.insert(n);
+      }
+    }
   }
-  for (int i = 0; i < t2->GetListOfBranches()->GetEntries(); i++) {
-    std::string n = t2->GetListOfBranches()->At(i)->GetName();
-    if (matchesPatterns(n, patterns))
-      branches2.insert(n);
-  }
-  std::set_intersection(branches1.begin(), branches1.end(), branches2.begin(),
-                        branches2.end(), std::inserter(common, common.begin()));
 
-  std::set<std::string> missingInFile1;
-  std::set<std::string> missingInFile2;
-  std::set_difference(branches2.begin(), branches2.end(), branches1.begin(),
-                      branches1.end(),
-                      std::inserter(missingInFile1, missingInFile1.begin()));
-  std::set_difference(branches1.begin(), branches1.end(), branches2.begin(),
-                      branches2.end(),
-                      std::inserter(missingInFile2, missingInFile2.begin()));
+  std::set<std::string> common = allBranches;
+  for (const auto &brs : branchesPerFile) {
+    std::set<std::string> nextCommon;
+    std::set_intersection(common.begin(), common.end(), brs.begin(), brs.end(),
+                          std::inserter(nextCommon, nextCommon.begin()));
+    common = std::move(nextCommon);
+  }
+
+  std::vector<std::set<std::string>> missingPerFile;
+  missingPerFile.resize(branchesPerFile.size());
+  for (size_t i = 0; i < branchesPerFile.size(); i++) {
+    std::set_difference(
+        allBranches.begin(), allBranches.end(), branchesPerFile[i].begin(),
+        branchesPerFile[i].end(),
+        std::inserter(missingPerFile[i], missingPerFile[i].begin()));
+  }
 
   std::vector<std::string> infoLines;
   infoLines.push_back(Color::BOLD_CYAN + "Comparing files:" + Color::RESET);
-  infoLines.push_back("  File 1: " + getBaseName(file1Path));
-  infoLines.push_back("  File 2: " + getBaseName(file2Path));
+  for (size_t i = 0; i < filePaths.size(); i++) {
+    infoLines.push_back("  File " + std::to_string(i + 1) + ": " +
+                        getBaseName(filePaths[i]));
+  }
   infoLines.push_back("  Tree: " + treeName);
   infoLines.push_back(std::string("  Mode: ") +
                       (COMPACT ? "Compact differences" : "Full collection"));
@@ -1326,19 +1189,17 @@ int main(int argc, char **argv) {
   printInfoBox(infoLines);
 
   std::cout << createSectionHeader("Missing Branches") << "\n\n";
-  std::cout << "Missing in " << getBaseName(file1Path) << ":\n";
-  if (missingInFile1.empty()) {
-    std::cout << "  " << Color::BOLD_GREEN << "✓ None" << Color::RESET << "\n";
-  } else {
-    printCollectionBoxes(groupByCollection(missingInFile1),
-                         Color::RED + std::string("✗") + Color::RESET);
-  }
-  std::cout << "\nMissing in " << getBaseName(file2Path) << ":\n";
-  if (missingInFile2.empty()) {
-    std::cout << "  " << Color::BOLD_GREEN << "✓ None" << Color::RESET << "\n";
-  } else {
-    printCollectionBoxes(groupByCollection(missingInFile2),
-                         Color::RED + std::string("✗") + Color::RESET);
+  for (size_t i = 0; i < filePaths.size(); i++) {
+    std::cout << "Missing in " << getBaseName(filePaths[i]) << ":\n";
+    if (missingPerFile[i].empty()) {
+      std::cout << "  " << Color::BOLD_GREEN << "✓ None" << Color::RESET
+                << "\n";
+    } else {
+      printCollectionBoxes(groupByCollection(missingPerFile[i]),
+                           Color::RED + std::string("✗") + Color::RESET);
+    }
+    if (i + 1 < filePaths.size())
+      std::cout << "\n";
   }
 
   std::cout << "\n" << createSectionHeader("Inspected Branches") << "\n\n";
@@ -1351,23 +1212,35 @@ int main(int argc, char **argv) {
   }
   std::cout << "\n";
 
-  TTreeReader r1(t1), r2(t2);
+  std::vector<std::unique_ptr<TTreeReader>> readers;
+  std::vector<TTreeReader *> readerPtrs;
+  readers.reserve(trees.size());
+  readerPtrs.reserve(trees.size());
+  for (auto *tree : trees) {
+    readers.push_back(std::make_unique<TTreeReader>(tree));
+    readerPtrs.push_back(readers.back().get());
+  }
+
   std::map<std::string, std::unique_ptr<BranchDiffHandler>> handlers;
   for (const auto &b : common) {
-    auto h = createReaderHandler(b, r1, r2, t1, t2);
+    auto h = createReaderHandler(b, trees, readerPtrs);
     if (h)
       handlers[b] = std::move(h);
   }
 
-  Long64_t maxEv = std::min(t1->GetEntries(), t2->GetEntries());
+  Long64_t maxEv = std::numeric_limits<Long64_t>::max();
+  for (auto *tree : trees) {
+    maxEv = std::min(maxEv, tree->GetEntries());
+  }
   Long64_t endEv =
       (numEvents == -1) ? maxEv : std::min(startEvent + numEvents, maxEv);
 
   std::map<Long64_t, std::map<std::string, std::vector<DiffEntry>>> evDiffs;
 
   for (Long64_t e = startEvent; e < endEv; e++) {
-    r1.SetEntry(e);
-    r2.SetEntry(e);
+    for (auto *r : readerPtrs) {
+      r->SetEntry(e);
+    }
 
     for (auto &[bn, h] : handlers) {
       std::vector<DiffEntry> ents;
@@ -1390,15 +1263,13 @@ int main(int argc, char **argv) {
       for (const auto &[cn, brs] : colls) {
         std::cout << createCollectionHeader(cn) << "\n\n";
 
-        // Collect all diff entries for this collection
         std::vector<std::pair<std::string, std::vector<DiffEntry>>> branchData;
         for (const auto &bn : brs) {
           branchData.push_back({bn, bds.at(bn)});
         }
 
-        // Create aligned panels
         std::vector<std::string> pans =
-            createAlignedPanels(branchData, COMPACT);
+            createAlignedPanels(branchData, COMPACT, filePaths.size());
 
         if (!pans.empty()) {
           printPanelsInColumns(pans);
@@ -1408,9 +1279,10 @@ int main(int argc, char **argv) {
     }
   }
 
-  f1->Close();
-  f2->Close();
-  delete f1;
-  delete f2;
+  for (auto *f : files) {
+    f->Close();
+    delete f;
+  }
+
   return 0;
 }
